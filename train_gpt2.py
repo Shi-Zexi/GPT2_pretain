@@ -190,7 +190,38 @@ class GPT(nn.Module):
         return model
 
 # -----------------------------------------------------------------------------
+import tiktoken
 
+class DataLoaderLite:
+    def __init__(self, B, T):
+        self.B = B  # 批大小
+        self.T = T  # 序列长度
+
+        # 从磁盘读取文本并进行 GPT2 编码，转换为 tensor 缓存在内存中
+        with open('input.txt', 'r') as f:
+            text = f.read()Add commentMore actions
+        enc = tiktoken.get_encoding('gpt2')
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        print(f"loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
+        # 初始化当前读取位置
+        self.current_position = 0
+
+    def next_batch(self):
+        B, T = self.B, self.T
+        # 获取当前批次的 token 段
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        # 构造输入 x 和目标 y
+        x = (buf[:-1]).view(B, T) 
+        y = (buf[1:]).view(B, T) 
+        # 更新当前位置，如果越界则重置
+        self.current_position += B * T
+        if self.current_position + (B * T + 1) > len(self.tokens):
+            self.current_position = 0
+        return x, y
+
+# -----------------------------------------------------------------------------
 # 自动检测运行设备（支持CUDA、MPS、CPU）
 device = "cpu"  # 默认设备
 if torch.cuda.is_available():
@@ -199,22 +230,8 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print(f"using device: {device}")
 
-# 加载tokenizer
-import tiktoken
-enc = tiktoken.get_encoding('gpt2')
-# 从input.txt文件中读取文本内容，并截取前1000个字符
-with open('input.txt', 'r') as f:
-    text = f.read()
-text = text[:1000]  # 只取前1000个字符作为样例
-# 编码为token序列
-tokens = enc.encode(text)
-# 构造形状为 (B=4, T=32) 的批次输入
-B, T = 4, 32  # 批量大小4，每个序列长度32
-buf = torch.tensor(tokens[:B*T + 1])  # 取出B*T+1个token（用于构造输入和标签）
-buf = buf.to(device)
-
-x = buf[:-1].view(B, T)  # 输入x：从第0到倒数第二个token，形状为(B, T)
-y = buf[1:].view(B, T)   # 标签y：从第1个到最后一个token，形状也为(B, T)
+# 初始化轻量数据加载器
+train_loader = DataLoaderLite(B=4, T=32)
 
 model = GPT(GPTConfig())             # 使用默认配置初始化GPT模型
 model.to(device)                     # 将模型移动到自动检测的设备上
@@ -222,6 +239,9 @@ model.to(device)                     # 将模型移动到自动检测的设备�
 # 初始化优化器，这里使用AdamW优化器，学习率设为3e-4
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)Add commentMore actions
 for i in range(50):   # 执行50次训练迭代
+    # 在训练循环中每次调用 next_batch 获取一个新的 (x, y)
+    x, y = train_loader.next_batch()
+    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
