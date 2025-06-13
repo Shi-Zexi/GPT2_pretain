@@ -117,6 +117,27 @@ class GPT(nn.Module):
         # 语言模型头，用于预测下一个 token
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+def forward(self, idx):
+    # 输入idx的形状为(B, T)，B是批量大小，T是序列长度
+    B, T = idx.size()
+    # 保证输入序列长度不超过模型的最大块大小
+    assert T <= self.config.block_size, f"输入序列长度为 {T}，超过了模型支持的最大长度 {self.config.block_size}"
+    # 生成位置索引（形状为 (T,)），用于获取位置嵌入
+    pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+    # 获取位置嵌入，形状为 (T, n_embd);词嵌入，形状为 (B, T, n_embd)
+    pos_emb = self.transformer.wpe(pos)
+    tok_emb = self.transformer.wte(idx)
+    # 将词嵌入与位置嵌入相加，得到最终的输入嵌入 (B, T, n_embd)
+    x = tok_emb + pos_emb
+    # 依次通过每个Transformer的Block模块进行前向传播
+    for block in self.transformer.h:
+        x = block(x)
+    # 通过最后一层LayerNorm进行归一化
+    x = self.transformer.ln_f(x)
+    # 使用语言模型头进行分类，得到每个位置上的词表概率分布 (B, T, vocab_size)
+    logits = self.lm_head(x)
+    return logits
+
     @classmethod
     def from_pretrained(cls, model_type):
         """从 Huggingface 加载预训练 GPT-2 权重"""
