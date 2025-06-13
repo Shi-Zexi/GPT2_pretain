@@ -188,12 +188,23 @@ def forward(self, idx):
 
 # -----------------------------------------------------------------------------
 
+# 自动检测运行设备（支持CUDA、MPS、CPU）
+device = "cpu"  # 默认设备
+if torch.cuda.is_available():
+    device = "cuda"
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = "mps"
+print(f"using device: {device}")
 
 num_return_sequences = 5   # 要生成的序列数量
 max_length = 30            # 设置生成文本的最大长度为30
-# 设置模型为推理模式并移动到GPU
-model.eval()
-model.to('cuda')
+
+# 初始化模型配置并实例化模型
+# model = GPT.from_pretrained('gpt2')  # 可选：加载预训练模型
+model = GPT(GPTConfig())             # 使用默认配置初始化GPT模型
+model.eval()                         # 设置模型为评估模式
+model.to(device)                     # 将模型移动到自动检测的设备上
+
 
 # 准备前缀文本的token
 import tiktoken
@@ -203,7 +214,7 @@ tokens = enc.encode("Hello, I'm a language model,")
 # 转为tensor并重复成多个序列作为批处理
 tokens = torch.tensor(tokens, dtype=torch.long)         # (T,)
 tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (B, T)
-x = tokens.to('cuda')                                    # 移动到GPU
+x = tokens.to(device)                                       # 将输入移动到同一设备上    
 
 # 设置随机种子
 torch.manual_seed(42)
