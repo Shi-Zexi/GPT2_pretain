@@ -187,6 +187,47 @@ def forward(self, idx):
         return model
 
 # -----------------------------------------------------------------------------
-# 测试加载 GPT-2 模型
-model = GPT.from_pretrained('gpt2')
-print("模型加载完成，没有崩溃！")
+
+
+num_return_sequences = 5   # 要生成的序列数量
+max_length = 30            # 设置生成文本的最大长度为30
+# 设置模型为推理模式并移动到GPU
+model.eval()
+model.to('cuda')
+
+# 准备前缀文本的token
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("Hello, I'm a language model,")
+
+# 转为tensor并重复成多个序列作为批处理
+tokens = torch.tensor(tokens, dtype=torch.long)         # (T,)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (B, T)
+x = tokens.to('cuda')                                    # 移动到GPU
+
+# 设置随机种子
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+
+# 开始生成过程
+while x.size(1) < max_length:
+    # 前向传播，获取logits
+    with torch.no_grad():
+        logits = model(x)  # (B, T, vocab_size)
+    # 取出当前序列最后一个位置的logits
+    logits = logits[:, -1, :]  # (B, vocab_size)
+    # softmax转为概率
+    probs = F.softmax(logits, dim=-1)
+    # 进行Top-k采样（k=50）
+    topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+    ix = torch.multinomial(topk_probs, 1)  # (B, 1)
+    # 从索引中查出采样得到的token
+    xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
+    # 拼接到原序列后面
+    x = torch.cat((x, xcol), dim=1)  # 更新x (B, T+1)
+
+# 打印生成的文本结果
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">", decoded)
