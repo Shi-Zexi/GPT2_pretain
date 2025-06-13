@@ -199,9 +199,6 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print(f"using device: {device}")
 
-# 强制指定设备为CPU（用于测试）
-device = "cpu"  # OVERRIDE
-
 # 加载tokenizer
 import tiktoken
 enc = tiktoken.get_encoding('gpt2')
@@ -214,15 +211,22 @@ tokens = enc.encode(text)
 # 构造形状为 (B=4, T=32) 的批次输入
 B, T = 4, 32  # 批量大小4，每个序列长度32
 buf = torch.tensor(tokens[:B*T + 1])  # 取出B*T+1个token（用于构造输入和标签）
+buf = buf.to(device)
+
 x = buf[:-1].view(B, T)  # 输入x：从第0到倒数第二个token，形状为(B, T)
 y = buf[1:].view(B, T)   # 标签y：从第1个到最后一个token，形状也为(B, T)
 
 model = GPT(GPTConfig())             # 使用默认配置初始化GPT模型
 model.to(device)                     # 将模型移动到自动检测的设备上
 
-logits, loss = model(x, y)
-
-print(loss)
+# 初始化优化器，这里使用AdamW优化器，学习率设为3e-4
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)Add commentMore actions
+for i in range(50):   # 执行50次训练迭代
+    optimizer.zero_grad()
+    logits, loss = model(x, y)
+    loss.backward()
+    optimizer.step()
+    print(f"step {i}, loss: {loss.item()}")
 import sys; sys.exit(0)  
 
 # 文本生成逻辑（已存在但未运行）
