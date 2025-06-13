@@ -15,6 +15,7 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         # 输出投影
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
         # 记录头数和嵌入维度
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -58,6 +59,7 @@ class MLP(nn.Module):
         self.gelu   = nn.GELU(approximate='tanh')
         # 输出投影回原始维度
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -116,6 +118,23 @@ class GPT(nn.Module):
         ))
         # 语言模型头，用于预测下一个 token
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # 添加了 embedding 层与输出层之间的权重共享机制（weight tying）
+        self.transformer.wte.weight = self.lm_head.weight
+
+        # 初始化参数
+        self.apply(self._init_weights)Add commentMore actions
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):  #线性层初始化
+            std = 0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):  #嵌入层初始化
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         # 输入idx的形状为(B, T)，B是批量大小，T是序列长度
@@ -229,6 +248,10 @@ if torch.cuda.is_available():
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print(f"using device: {device}")
+
+torch.manual_seed(1337)
+if torch.cuda.is_available():Add commentMore actions
+    torch.cuda.manual_seed(1337)
 
 # 初始化轻量数据加载器
 train_loader = DataLoaderLite(B=4, T=32)
