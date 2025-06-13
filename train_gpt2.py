@@ -196,25 +196,41 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print(f"using device: {device}")
 
-num_return_sequences = 5   # 要生成的序列数量
-max_length = 30            # 设置生成文本的最大长度为30
+# 强制指定设备为CPU（用于测试）
+device = "cpu"  # OVERRIDE
 
-# 初始化模型配置并实例化模型
-# model = GPT.from_pretrained('gpt2')  # 可选：加载预训练模型
-model = GPT(GPTConfig())             # 使用默认配置初始化GPT模型
-model.eval()                         # 设置模型为评估模式
-model.to(device)                     # 将模型移动到自动检测的设备上
-
-
-# 准备前缀文本的token
+# 加载tokenizer
 import tiktoken
 enc = tiktoken.get_encoding('gpt2')
-tokens = enc.encode("Hello, I'm a language model,")
+# 从input.txt文件中读取文本内容，并截取前1000个字符
+with open('input.txt', 'r') as f:
+    text = f.read()
+text = text[:1000]  # 只取前1000个字符作为样例
+# 编码为token序列
+tokens = enc.encode(text)
+# 构造形状为 (B=4, T=32) 的批次输入
+B, T = 4, 32  # 批量大小4，每个序列长度32
+buf = torch.tensor(tokens[:B*T + 1])  # 取出B*T+1个token（用于构造输入和标签）
+x = buf[:-1].view(B, T)  # 输入x：从第0到倒数第二个token，形状为(B, T)
+y = buf[1:].view(B, T)   # 标签y：从第1个到最后一个token，形状也为(B, T)
 
-# 转为tensor并重复成多个序列作为批处理
-tokens = torch.tensor(tokens, dtype=torch.long)         # (T,)
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (B, T)
-x = tokens.to(device)                                       # 将输入移动到同一设备上    
+model = GPT(GPTConfig())             # 使用默认配置初始化GPT模型
+model.to(device)                     # 将模型移动到自动检测的设备上
+
+logits = model(x)  # 输出logits，形状为 (B, T, vocab_size)
+
+print(logits.shape)  # 打印logits的维度确认输出是否正确
+import sys; sys.exit(0)  
+
+# 文本生成逻辑（已存在但未运行）
+model.eval()  # 设置模型为评估模式
+num_return_sequences = 5  # 要生成的序列数量
+max_length = 30           # 每个生成序列的最大长度
+
+tokens = enc.encode("Hello, I'm a language model,")
+tokens = torch.tensor(tokens, dtype=torch.long)              # (8,)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
+x = tokens.to(device)                                          
 
 # 设置随机种子
 torch.manual_seed(42)
