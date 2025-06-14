@@ -35,14 +35,8 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        # 计算注意力分数，并缩放
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        # 应用因果蒙版，屏蔽未来位置
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        # 归一化注意力权重
-        att = F.softmax(att, dim=-1)
-        # 加权值向量并聚合
-        y = att @ v  # (B, nh, T, hs)
+        # 引入的高性能 Flash Attention 接口
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
         # 恢复维度顺序并拼接所有头
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         # 输出线性投影
