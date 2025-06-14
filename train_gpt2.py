@@ -123,7 +123,7 @@ class GPT(nn.Module):
         self.transformer.wte.weight = self.lm_head.weight
 
         # 初始化参数
-        self.apply(self._init_weights)Add commentMore actions
+        self.apply(self._init_weights)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):  #线性层初始化
@@ -218,7 +218,7 @@ class DataLoaderLite:
 
         # 从磁盘读取文本并进行 GPT2 编码，转换为 tensor 缓存在内存中
         with open('input.txt', 'r') as f:
-            text = f.read()Add commentMore actions
+            text = f.read()
         enc = tiktoken.get_encoding('gpt2')
         tokens = enc.encode(text)
         self.tokens = torch.tensor(tokens)
@@ -242,6 +242,8 @@ class DataLoaderLite:
 
 # -----------------------------------------------------------------------------
 # 自动检测运行设备（支持CUDA、MPS、CPU）
+import time
+
 device = "cpu"  # 默认设备
 if torch.cuda.is_available():
     device = "cuda"
@@ -250,26 +252,33 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
 print(f"using device: {device}")
 
 torch.manual_seed(1337)
-if torch.cuda.is_available():Add commentMore actions
+if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
 # 初始化轻量数据加载器
-train_loader = DataLoaderLite(B=4, T=32)
+train_loader = DataLoaderLite(B=16, T=1024)
+
+torch.set_float32_matmul_precision('high')
 
 model = GPT(GPTConfig())             # 使用默认配置初始化GPT模型
 model.to(device)                     # 将模型移动到自动检测的设备上
 
 # 初始化优化器，这里使用AdamW优化器，学习率设为3e-4
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)Add commentMore actions
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):   # 执行50次训练迭代
     # 在训练循环中每次调用 next_batch 获取一个新的 (x, y)
+    t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    print(f"step {i}, loss: {loss.item()}")
+    torch.cuda.synchronize() # 等待GPU完成工作
+    t1 = time.time()
+    dt = (t1 - t0)*1000 # 计算时差
+    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
 import sys; sys.exit(0)  
 
 # 文本生成逻辑（已存在但未运行）
