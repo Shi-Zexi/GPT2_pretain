@@ -252,7 +252,7 @@ if torch.cuda.is_available():
 # 初始化轻量数据加载器
 train_loader = DataLoaderLite(B=16, T=1024)
 
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision('high') 
 
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)                     # 将模型移动到自动检测的设备上
@@ -272,9 +272,10 @@ for i in range(50):   # 执行50次训练迭代
     optimizer.step()
     torch.cuda.synchronize() # 等待GPU完成工作
     t1 = time.time()
-    dt = (t1 - t0)*1000 # 计算时差
-    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
-    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+    dt = t1 - t0 # time difference in seconds
+    tokens_processed = train_loader.B * train_loader.TAdd commentMore actions
+    tokens_per_sec = tokens_processed / dt
+    print(f"step {i:4d} | loss: {loss.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
 import sys; sys.exit(0)  
 
 # 文本生成逻辑（已存在但未运行）
