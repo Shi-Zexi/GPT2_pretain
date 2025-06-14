@@ -262,6 +262,7 @@ torch.set_float32_matmul_precision('high')
 
 model = GPT(GPTConfig())             # 使用默认配置初始化GPT模型
 model.to(device)                     # 将模型移动到自动检测的设备上
+model = torch.compile(model)
 
 # 初始化优化器，这里使用AdamW优化器，学习率设为3e-4
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
@@ -271,7 +272,8 @@ for i in range(50):   # 执行50次训练迭代
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):Add commentMore actions
+        logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
     torch.cuda.synchronize() # 等待GPU完成工作
