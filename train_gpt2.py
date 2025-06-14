@@ -254,7 +254,7 @@ train_loader = DataLoaderLite(B=16, T=1024)
 
 torch.set_float32_matmul_precision('high')
 
-model = GPT(GPTConfig())             # 使用默认配置初始化GPT模型
+model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)                     # 将模型移动到自动检测的设备上
 model = torch.compile(model)
 
