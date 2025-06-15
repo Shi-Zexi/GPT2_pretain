@@ -286,7 +286,15 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
 # 初始化轻量数据加载器
-train_loader = DataLoaderLite(B=16, T=1024)
+total_batch_size = 524288 
+B = 16   #micro batch size，即单个step实际加载的样本数量
+T = 1024   # 每个样本的序列长度（token数）
+assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
+grad_accum_steps = total_batch_size // (B * T)
+print(f"total desired batch size: {total_batch_size}")
+print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+
+train_loader = DataLoaderLite(B=B, T=T)
 
 torch.set_float32_matmul_precision('high') 
 
@@ -300,16 +308,13 @@ warmup_steps = 10
 max_steps = 50
 # 自定义学习率调度函数，传入当前迭代次数 it
 def get_lr(it):
-    # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
         return max_lr * (it+1) / warmup_steps
-    # 2) if it > lr_decay_iters, return min learning rateAdd commentMore actions
     if it > max_steps:
         return min_lr
-    # 3) in between, use cosine decay down to min learning rate
     decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
     assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) 
     return min_lr + coeff * (max_lr - min_lr)
 
 
@@ -318,25 +323,32 @@ optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, dev
 
 for step in range(max_steps):
     t0 = time.time()
-    x, y = train_loader.next_batch()
-    x, y = x.to(device), y.to(device)
+    
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):Add commentMore actions
-        logits, loss = model(x, y)
-    loss.backward()
+    loss_accum = 0.0
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        
+        loss = loss / grad_accum_steps  # 缩放 loss
+        loss_accum += loss.detach()
+        loss.backward()   # 累积梯度
+
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # 获取当前步的学习率（含warmup和余弦衰减）
-    lr = get_lr(step)Add commentMore actions
+    lr = get_lr(step)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr # 动态设置当前步的学习率
     optimizer.step()
     torch.cuda.synchronize() # 等待GPU完成工作
     t1 = time.time()
-    dt = t1 - t0 # time difference in seconds
-    tokens_processed = train_loader.B * train_loader.TAdd commentMore actions
+    dt = t1 - t0
+    tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
     tokens_per_sec = tokens_processed / dt
-    # 打印日志：包含 step、loss、学习率、梯度范数、耗时、吞吐率
-    print(f"step {step:4d} | loss: {loss.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+    # 打印日志
+    print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)  
 
