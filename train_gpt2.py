@@ -336,9 +336,10 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
+enc = tiktoken.get_encoding("gpt2")
 # 初始化轻量数据加载器
 total_batch_size = 524288 
-B = 64   #micro batch size，即单个step实际加载的样本数量
+B = 32   #micro batch size，即单个step实际加载的样本数量
 T = 1024   # 每个样本的序列长度（token数）
 
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
@@ -399,6 +400,37 @@ for step in range(max_steps):
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
 
+    # 每隔一段时间从模型生成一段文本（step=0 时不生成，因为此时模型尚未训练）
+    # 当前代码被禁用，因为在开启 torch.compile 时该段代码会报错
+    # 若关闭 torch.compile，该段代码可正常运行
+    if step > 0 and step % 100 == 0 and False:
+        model.eval()  # 切换为评估模式，禁用 dropout 等
+        num_return_sequences = 4
+        max_length = 32
+        tokens = enc.encode("Hello, I'm a language model,")
+        tokens = torch.tensor(tokens, dtype=torch.long)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        xgen = tokens.to(device)
+        sample_rng = torch.Generator(device=device)
+        sample_rng.manual_seed(42 + ddp_rank)
+        while xgen.size(1) < max_length:
+            # forward the model to get the logits
+            with torch.no_grad():
+                logits, loss = model(xgen)        # 模型输出 (B, T, vocab_size)
+                logits = logits[:, -1, :]         # 只取当前序列最后一个 token 的 logits (B, vocab_size)
+                probs = F.softmax(logits, dim=-1) # 概率分布
+                
+                # top-k 采样，取前 50 个概率最大的 token 候选
+                topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)  # (B, 50)
+                ix = torch.multinomial(topk_probs, 1, generator=sample_rng)  # 从 top-k 概率中采样 (B, 1)
+                xcol = torch.gather(topk_indices, -1, ix)                    # 得到采样出的 token (B, 1)
+                xgen = torch.cat((xgen, xcol), dim=1)                        # 将采样结果拼接到序列末尾
+        # 打印生成结果
+        for i in range(num_return_sequences):
+            tokens = xgen[i, :max_length].tolist()
+            decoded = enc.decode(tokens)
+            print(f"rank {ddp_rank} sample {i}: {decoded}")
+
     # 训练过程
     model.train()
     optimizer.zero_grad()
@@ -432,42 +464,3 @@ for step in range(max_steps):
         print(f"step {step:5d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
 if ddp:
     destroy_process_group()
-
-import sys; sys.exit(0)  
-
-# 文本生成逻辑（已存在但未运行）
-model.eval()  # 设置模型为评估模式
-num_return_sequences = 5  # 要生成的序列数量
-max_length = 30           # 每个生成序列的最大长度
-
-tokens = enc.encode("Hello, I'm a language model,")
-tokens = torch.tensor(tokens, dtype=torch.long)              # (8,)
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
-x = tokens.to(device)                                          
-
-# 设置随机种子
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-
-# 开始生成过程
-while x.size(1) < max_length:
-    # 前向传播，获取logits
-    with torch.no_grad():
-        logits = model(x)  # (B, T, vocab_size)
-    # 取出当前序列最后一个位置的logits
-    logits = logits[:, -1, :]  # (B, vocab_size)
-    # softmax转为概率
-    probs = F.softmax(logits, dim=-1)
-    # 进行Top-k采样（k=50）
-    topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-    ix = torch.multinomial(topk_probs, 1)  # (B, 1)
-    # 从索引中查出采样得到的token
-    xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
-    # 拼接到原序列后面
-    x = torch.cat((x, xcol), dim=1)  # 更新x (B, T+1)
-
-# 打印生成的文本结果
-for i in range(num_return_sequences):
-    tokens = x[i, :max_length].tolist()
-    decoded = enc.decode(tokens)
-    print(">", decoded)
