@@ -6,6 +6,7 @@ import inspect
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from hellaswag import render_example, iterate_examples
 
 # -----------------------------------------------------------------------------
 
@@ -295,6 +296,29 @@ class DataLoaderLite:
         return x, y
 
 # -----------------------------------------------------------------------------
+# helper function for HellaSwag eval
+# takes tokens, mask, and logits, returns the index of the completion with the lowest loss
+
+def get_most_likely_row(tokens, mask, logits):
+    # evaluate the autoregressive loss at all positions
+    shift_logits = (logits[..., :-1, :]).contiguous()
+    shift_tokens = (tokens[..., 1:]).contiguous()
+    flat_shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+    flat_shift_tokens = shift_tokens.view(-1)
+    shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduction='none')
+    shift_losses = shift_losses.view(tokens.size(0), -1)
+    # now get the average loss just for the completion region (where mask == 1), in each row
+    shift_mask = (mask[..., 1:]).contiguous() # we must shift mask, so we start at the last prompt token
+    masked_shift_losses = shift_losses * shift_mask
+    # sum and divide by the number of 1s in the mask
+    sum_loss = masked_shift_losses.sum(dim=1)
+    avg_loss = sum_loss / shift_mask.sum(dim=1)
+    # now we have a loss for each of the 4 completions
+    # the one with the lowest loss should be the most likely
+    pred_norm = avg_loss.argmin().item()
+    return pred_norm
+
+# -----------------------------------------------------------------------------
 # simple launch:单机运行命令
 # python train_gpt2.py
 # DDP launch for e.g. 8 GPUs:多卡 DDP 模式运行命令（例如使用 8 个 GPU）
@@ -339,7 +363,7 @@ if torch.cuda.is_available():
 enc = tiktoken.get_encoding("gpt2")
 # 初始化轻量数据加载器
 total_batch_size = 524288 
-B = 32   #micro batch size，即单个step实际加载的样本数量
+B = 64   #micro batch size，即单个step实际加载的样本数量
 T = 1024   # 每个样本的序列长度（token数）
 
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
@@ -355,7 +379,10 @@ torch.set_float32_matmul_precision('high')
 # create model
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)                     # 将模型移动到自动检测的设备上
-model = torch.compile(model)
+
+use_compile = False # torch.compile interferes with HellaSwag eval and Generation. TODO fix
+if use_compile:
+    model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
@@ -379,10 +406,18 @@ def get_lr(it):
 # 初始化优化器，这里使用AdamW优化器
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
+# create the log directory we will write checkpoints to and log to
+log_dir = "log"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"log.txt")
+with open(log_file, "w") as f: # open for writing to clear the file
+    pass
+
 for step in range(max_steps):
     t0 = time.time()
+    last_step = (step == max_steps - 1)
     # 每隔 100 步执行一次验证
-    if step % 100 == 0:
+    if step % 250 == 0 or last_step:
         model.eval()    # 切换为评估模式
         val_loader.reset()
         with torch.no_grad():
@@ -399,11 +434,47 @@ for step in range(max_steps):
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+    # 每隔 250 步，或者如果是最后一步，执行一次 HellaSwag 数据集上的评估
+    if (step % 250 == 0 or last_step) and (not use_compile):
+        num_correct_norm = 0
+        num_total = 0
+        for i, example in enumerate(iterate_examples("val")):
+            # 多卡训练下，仅处理属于当前进程的数据
+            if i % ddp_world_size != ddp_rank:
+                continue
+            # 将 HellaSwag 的样本转为 tokens、mask、label
+            _, tokens, mask, label = render_example(example)
+            tokens = tokens.to(device)
+            mask = mask.to(device)
+            # 预测logits
+            with torch.no_grad():
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(tokens)
+                pred_norm = get_most_likely_row(tokens, mask, logits)
+            num_total += 1
+            num_correct_norm += int(pred_norm == label)
+        # 如果是 DDP 多进程模式，将所有进程的统计值聚合
+        if ddp:
+            num_total = torch.tensor(num_total, dtype=torch.long, device=device)
+            num_correct_norm = torch.tensor(num_correct_norm, dtype=torch.long, device=device)
+            dist.all_reduce(num_total, op=dist.ReduceOp.SUM)
+            dist.all_reduce(num_correct_norm, op=dist.ReduceOp.SUM)
+            num_total = num_total.item()
+            num_correct_norm = num_correct_norm.item()
+        # 计算准确率
+        acc_norm = num_correct_norm / num_total
+        if master_process:
+            print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"{step} hella {acc_norm:.4f}\n")
+    
 
     # 每隔一段时间从模型生成一段文本（step=0 时不生成，因为此时模型尚未训练）
     # 当前代码被禁用，因为在开启 torch.compile 时该段代码会报错
     # 若关闭 torch.compile，该段代码可正常运行
-    if step > 0 and step % 100 == 0 and False:
+    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile):
         model.eval()  # 切换为评估模式，禁用 dropout 等
         num_return_sequences = 4
         max_length = 32
@@ -416,10 +487,11 @@ for step in range(max_steps):
         while xgen.size(1) < max_length:
             # forward the model to get the logits
             with torch.no_grad():
-                logits, loss = model(xgen)        # 模型输出 (B, T, vocab_size)
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(xgen) # (B, T, vocab_size) 
                 logits = logits[:, -1, :]         # 只取当前序列最后一个 token 的 logits (B, vocab_size)
                 probs = F.softmax(logits, dim=-1) # 概率分布
-                
+
                 # top-k 采样，取前 50 个概率最大的 token 候选
                 topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)  # (B, 50)
                 ix = torch.multinomial(topk_probs, 1, generator=sample_rng)  # 从 top-k 概率中采样 (B, 1)
@@ -431,7 +503,7 @@ for step in range(max_steps):
             decoded = enc.decode(tokens)
             print(f"rank {ddp_rank} sample {i}: {decoded}")
 
-    # 训练过程
+    # do one step of the optimization
     model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
@@ -462,5 +534,7 @@ for step in range(max_steps):
     # 打印日志
     if master_process:
         print(f"step {step:5d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+        with open(log_file, "a") as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
 if ddp:
     destroy_process_group()
